@@ -21,6 +21,16 @@ next_description = None
 python_print = builtins.print
 
 
+def update(n):
+    '''
+    When within a progress loop, pbar.update(n) will update
+    the value of the progress bar.
+    '''
+    innermost = innermost_tqdm()
+    if innermost is not None:
+        innermost.update(n)
+
+
 def post(**kwargs):
     '''
     When within a progress loop, pbar.post(k=str) will display
