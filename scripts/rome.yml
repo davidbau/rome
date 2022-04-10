@@ -8,6 +8,7 @@ dependencies:
   - cudatoolkit=11.3.1
   - pytorch=1.10.2
   - pip:
+    - git+https://github.com/davidbau/captum.git@transformer_tuples
     - aiohttp==3.8.1
     - aiosignal==1.2.0
     - allennlp==2.9.0
