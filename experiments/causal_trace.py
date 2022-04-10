@@ -208,7 +208,7 @@ def trace_with_repatch(
 
 
 def calculate_hidden_flow(
-    mt, prompt, subject, samples=10, noise=0.1, window=10, kind=None
+    mt, prompt, subject, samples=10, noise=0.1, window=10, extra_token=0, kind=None
 ):
     """
     Runs causal tracing over every token/layer combination in the network
@@ -219,6 +219,7 @@ def calculate_hidden_flow(
         answer_t, base_score = [d[0] for d in predict_from_input(mt.model, inp)]
     [answer] = decode_tokens(mt.tokenizer, [answer_t])
     e_range = find_token_range(mt.tokenizer, inp["input_ids"][0], subject)
+    e_range = (e_range[0], e_range[1] + extra_token)
     low_score = trace_with_patch(
         mt.model, inp, [], answer_t, e_range, noise=noise
     ).item()
