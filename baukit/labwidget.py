@@ -48,7 +48,8 @@ import io
 import json
 import html
 import re
-from inspect import signature
+import warnings
+from inspect import signature, getmro
 from . import show
 
 
@@ -216,7 +217,7 @@ class Widget(Model):
         Override to define the initial HTML view of the widget.  Should
         define an element with id given by view_id().
         '''
-        with show.enter_tag() as t:
+        with show.enter() as t:
             return t.begin() + t.end()
 
     def view_id(self):
@@ -237,7 +238,7 @@ class Widget(Model):
         Returns the HTML code for the widget.
         '''
         self._viewcount += 1
-        json_data = json.dumps({
+        json_data = jsondump({
             k: v.value for k, v in vars(self).items()
             if isinstance(v, Property)})
         json_data = re.sub('</', '<\\/', json_data)
@@ -285,7 +286,7 @@ class Widget(Model):
                 colab_output.eval_js(minify(f"""
                 (window.send_{id(self)} = window.send_{id(self)} ||
                 new BroadcastChannel("channel_{id(self)}")
-                ).postMessage({json.dumps(args)});
+                ).postMessage({jsondump(args)});
                 """), ignore_result=True)
             elif WIDGET_ENV == 'jupyter':
                 if not self._comms:
@@ -293,6 +294,8 @@ class Widget(Model):
                     return
                 for comm in self._comms:
                     comm.send(args)
+            else:
+                no_env_warning()
 
     def _recv_from_js_(self, fn):
         if WIDGET_ENV == 'colab':
@@ -319,6 +322,8 @@ class Widget(Model):
                     handle_comm(open_msg)
             cname = "comm_" + str(id(self))
             COMM_MANAGER.register_target(cname, open_comm)
+        else:
+            no_env_warning()
 
     def display(self):
         from IPython.core.display import display
@@ -553,7 +558,7 @@ class Button(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('input', self.std_attrs(),
+        return show.emit('input', self.std_attrs(),
                     type='button', value=self.label)
 
 class Label(Widget):
@@ -574,7 +579,7 @@ class Label(Widget):
 
     def widget_html(self):
         out = []
-        with show.enter_tag('label', self.std_attrs(), out=out):
+        with show.enter('label', self.std_attrs(), out=out):
             out.append(html.escape(str(self.value)))
         return ''.join(out)
 
@@ -610,7 +615,7 @@ class Textbox(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('input', self.std_attrs(),
+        return show.emit('input', self.std_attrs(),
                     type='text', value=self.value, size=self.size)
 
 
@@ -645,7 +650,7 @@ class Numberbox(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('input', self.std_attrs(),
+        return show.emit('input', self.std_attrs(),
                     type='numeric', value=self.value, size=self.size)
 
 class Textarea(Widget):
@@ -675,7 +680,7 @@ class Textarea(Widget):
 
     def widget_html(self):
         out = []
-        with show.enter_tag('textarea', self.std_attrs(), out=out):
+        with show.enter('textarea', self.std_attrs(), out=out):
             out.append(html.escape(self.value))
         return ''.join(out)
 
@@ -706,7 +711,7 @@ class Range(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('input', self.std_attrs(),
+        return show.emit('input', self.std_attrs(),
                     type='range', value=self.value,
                     min=self.min, max=self.max, step=self.step)
 
@@ -733,7 +738,7 @@ class ColorPicker(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('input', self.std_attrs(),
+        return show.emit('input', self.std_attrs(),
                     type='color', value=self.value)
 
 
@@ -778,10 +783,10 @@ class Choice(Widget):
 
     def widget_html(self):
         out = []
-        with show.enter_tag('form', self.std_attrs(), out=out):
+        with show.enter('form', self.std_attrs(), out=out):
             for value in self.choices:
-                with show.enter_tag('label', out=out):
-                    show.emit_tag('input',
+                with show.enter('label', out=out):
+                    show.emit('input',
                         (show.attrs(checked=None) if value == self.selection else None),
                         name='choice', type='radio', value=value, out=out)
         return ''.join(out)
@@ -825,10 +830,10 @@ class Menu(Widget):
 
     def widget_html(self):
         out = []
-        with show.enter_tag('form', self.std_attrs(), out=out):
-            with show.enter_tag(show.Tag('select', name='menu'), out=out):
+        with show.enter('form', self.std_attrs(), out=out):
+            with show.enter(show.Tag('select', name='menu'), out=out):
                 for value in self.choices:
-                    with show.enter_tag(show.Tag('option',
+                    with show.enter(show.Tag('option',
                             (show.attr(selected=None) if value == self.selection else None),
                             value=value), out=out):
                         out.append(html.escape(str(value)))
@@ -893,13 +898,13 @@ class Datalist(Widget):
 
     def widget_html(self):
         out = []
-        with show.enter_tag('form', self.std_attrs(),
+        with show.enter('form', self.std_attrs(),
                 onsubmit='return false;', out=out):
-            show.emit_tag('input', name='inp', list=self.datalist_id(),
+            show.emit('input', name='inp', list=self.datalist_id(),
                     autocomplete='off', out=out)
-            with show.enter_tag(show.Tag('datalist'), id=self.datalist_id()):
+            with show.enter(show.Tag('datalist'), id=self.datalist_id()):
                 for value in self.choices:
-                    show.emit_tag('option', value=str(value))
+                    show.emit('option', value=str(value))
 
 
 class Div(Widget):
@@ -948,7 +953,7 @@ class Div(Widget):
 
     def widget_html(self):
         out = []
-        with emit.enter_tag(self.std_attrs(), out=out):
+        with show.enter(self.std_attrs(), out=out):
             out.append(self.innerHTML);
         return ''.join(out)
 
@@ -993,13 +998,18 @@ class Image(Widget):
         """Clears the image."""
         self.src = ''
 
-    def render(self, obj):
+    def render(self, obj, **kwargs):
         buf = io.BytesIO()
+        if 'format' not in kwargs:
+            kwargs['format'] = 'png'
+        mime_format = kwargs['format'].lower()
+        mime_format = dict(jpg='jpeg', svg='svg+xml'
+                ).get(mime_format, mime_format)
         if hasattr(obj, 'save'): # Like a PIL.Image.Image
-            obj.save(buf, format='png')
+            obj.save(buf, **kwargs)
         elif hasattr(obj, 'savefig'): # Like a matplotlib.figure.Figure
-            obj.savefig(buf, format='png', bbox_inches='tight')
-        self.src= 'data:image/png;base64,' + (
+            obj.savefig(buf, **kwargs)
+        self.src= f'data:image/{mime_format};base64,' + (
             base64.b64encode(buf.getvalue()).decode('utf-8'))
         buf.close()
 
@@ -1012,7 +1022,7 @@ class Image(Widget):
         ''')
 
     def widget_html(self):
-        return show.emit_tag('img', self.std_attrs(), show.style(margin=0),
+        return show.emit('img', self.std_attrs(), show.style(margin=0),
                 src=self.src)
 
 
@@ -1020,6 +1030,24 @@ class Image(Widget):
 # Utils
 ##########################################################################
 
+def baseclass_named(obj, *class_names):
+    '''
+    Detects if obj is a subclass of a class named clsname, without requiring import
+    of the class.
+    '''
+    for x in getmro(type(obj)):
+        if (x.__module__ + '.' + x.__name__) in class_names:
+             return True
+    return False
+
+class PermissiveEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if baseclass_named(obj, 'numpy.ndarray', 'torch.Tensor'):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+def jsondump(d):
+    return json.dumps(d, cls=PermissiveEncoder)
 
 def minify(t):
     # TODO: plug in some more real minification.
@@ -1079,8 +1107,9 @@ if WIDGET_ENV is None:
         WIDGET_ENV = 'jupyter'
     except Exception as e:
         pass
-if WIDGET_ENV is None:
-    print('Neither colab nor jupyter environment found.')
+
+def no_env_warning():
+    warnings.warn('Neither colab nor jupyter environment found.')
 
 SEND_RECV_JS = """
 function recvFromPython(obj_id, fn) {

@@ -32,34 +32,18 @@ def show(*args):
     The main function.  Calls the IPython display function to show the
     HTML-rendered arguments.
     '''
-    display(html(*args))
-
-def bare(*args):
-    '''
-    show.bare renders HTML without an automatic top-level element, which makes
-    it possible to output bare HTML without an element at all. It also puts
-    the output of top-level under the control of the user.
-    '''
-    display(bare_html(*args))
+    display(HtmlRepr(html(*args)))
 
 def html(*args):
     '''
-    Renders the arguments into an HtmlRepr without displaying directly.
+    Renders the arguments into an string without displaying directly.
     '''
-    out = []
-    with enter_tag(out=out):
-        for x in args:
-            render(x, out)
-    return HtmlRepr(''.join(out))
-
-def bare_html(*args):
-    '''
-    Without an outermost element, renders the arguments as an HtmlRepr.
-    '''
+    tag_modifications.clear()
     out = []
     for x in args:
         render(x, out)
-    return HtmlRepr(''.join(out))
+    tag_modifications.clear()
+    return ''.join(out)
 
 def raw_html(*args):
     '''
@@ -69,7 +53,7 @@ def raw_html(*args):
     return HtmlRepr(''.join(str(x) for x in args))
 
 @contextmanager
-def enter_tag(*args, out=None, **kwargs):
+def enter(*args, out=None, **kwargs):
     '''
     Context manager for creating and emitting a tag and its matching
     end-tag.  When the tag is created, any current defaults and options
@@ -79,7 +63,7 @@ def enter_tag(*args, out=None, **kwargs):
 
     ```
     out = []
-    with show.enter_tag('div', id='d38', style(topMargin='8px'), out=out):
+    with show.enter('div', id='d38', style(topMargin='8px'), out=out):
         out.append('inside the div')
     ```
 
@@ -96,7 +80,7 @@ def enter_tag(*args, out=None, **kwargs):
     if len(tag_stack) and tag_stack[-1] is not None:
         default_tag = tag_stack[-1]
     else:
-        default_tag = HORIZONTAL
+        default_tag = H
     current_tag = default_tag(*args, **kwargs)
     current_tag.update(*tag_modifications)
     tag_modifications.clear()
@@ -111,15 +95,15 @@ def enter_tag(*args, out=None, **kwargs):
         tag_modifications.clear()
         tag_stack.pop()
 
-def emit_tag(*args, out=None, **kwargs):
+def emit(*args, out=None, **kwargs):
     '''
     Emits the specified tag, applying any current defaults and options
-    to the styles and attributes.  Options are handled as with enter_tag.
+    to the styles and attributes.  Options are handled as with enter.
 
     If no `out` array is provided, returns the tag as a string.
     '''
     emit_out = [] if out is None else out
-    with enter_tag(*args, out=emit_out, **kwargs):
+    with enter(*args, out=emit_out, **kwargs):
         if out is None:
             return ''.join(emit_out)
 
@@ -129,10 +113,12 @@ HTML_EMPTY = set(('area base br col embed hr img input keygen '
 CSS_UNITS = dict([(k, unit) for keys, unit in [
   ('width height min-width max-width min-height max-height', 'px'),
   ('left right top bottom', 'px'),
-  ('font-size', 'px'),
+  ('font-size text-indent', 'px'),
+  ('gap column-gap row-gap', 'px'),
   ('border border-left border-right border-top border-bottom '
     'border-width border-left-width border-right-width '
     'border-top-width border-bottom-width', 'px'),
+  ('border-spacing letter-spacing word-spacing', 'px'),
   ('margin margin-left margin-right margin-top margin-bottom', 'px'),
   ('padding padding-left padding-right padding-top padding-bottom', 'px'),
 ] for k in keys.split(' ')])
@@ -141,6 +127,8 @@ def hyphenateCamelKeys(d):
     return {re.sub('([A-Z]+)', r'-\1', k).lower() : v for k, v in d.items()}
 
 def styleValue(v, k):
+    if callable(v):
+        v = v()
     if isinstance(v, (int, float)) and k in CSS_UNITS:
         return f'{v}{CSS_UNITS[k]}'
     return str(v)
@@ -219,28 +207,66 @@ class Tag:
     def __repr__(self):
         return str(self)
 
+def tag(*args, **kwargs):
+    return Tag(*args, **kwargs)
+
+def inherit_value(top, inner='inherit'):
+    '''
+    A callable style value that resolves to one default at the top level
+    and a different value when nested inside tags.
+    '''
+    def resolve():
+        return top if len(tag_stack) <= 2 else inner
+    return resolve
+
 
 # This is the default loop for nesting children: horizontal layout by default,
 # and then vertical layout for nested arrays; then horizontal within those, etc.
-HORIZONTAL = Tag(
-        style(display='flex', flex='1', flexFlow='row wrap', gap='3px',
-            alignItems='center'))
-VERTICAL = Tag(
-        style(display='flex', flex='1', flexFlow='column', gap='3px'),
-        ChildTag(HORIZONTAL))
-HORIZONTAL.update(ChildTag(VERTICAL))
-INLINE = Tag(
-        style(display='inline-flex', flexFlow='row wrap', gap='3px',
-            alignItems='center'),
-        ChildTag(VERTICAL))
+V = Tag(
+        style(display='flex', flex='1', flexFlow='column',
+            gap=inherit_value(3)))
 
-tag_stack = [INLINE]
+H = Tag(
+        style(display='flex', flex='1', flexFlow='row wrap',
+            gap=inherit_value(3)),
+        ChildTag(V))
+V.update(ChildTag(H))
+
+# Tables
+TD = Tag('td', ChildTag(H))
+TR = Tag('tr', ChildTag(TD))
+TABLE = Tag('table', ChildTag(TR))
+
+# Remove defaults
+PLAIN = Tag()
+
+# The TIGHT style allows the content to provide the size, instead of
+# expanding to fill the available space.
+TIGHT = Tag(
+        style(display='inline-flex', flex=None, flexFlow='column',
+            gap=inherit_value(3)),
+        ChildTag(H))
+
+# WRAP provides wrapping lines of TIGHT boxes, akin to layout of text
+WRAP = Tag(
+        style(display='flex', flex='1', flexFlow='row wrap',
+            gap=inherit_value(3), alignItems='start'),
+        ChildTag(TIGHT))
+
+
+tag_stack = [V]
 tag_modifications = []
 
 def modify_tag(*args):
+    '''
+    Accumulates tag modifications to be applied to the next tag rendered.
+    '''
     tag_modifications.extend(args)
 
 def render(obj, out):
+    '''
+    The main rendering dispatch.
+    '''
     for detector, renderer in RENDERING_RULES:
         if (isinstance(obj, detector) if isinstance(detector, (type, tuple)) else detector(obj)):
             if renderer(obj, out) is not False:
@@ -256,7 +282,7 @@ def render_str(obj, out):
     if '\n' in s:
         render_pre(s, out)
         return
-    with enter_tag(out=out):
+    with enter(out=out):
         out.append(escape(s))
 
 def render_html(obj, out):
@@ -271,11 +297,23 @@ def render_html(obj, out):
         return False
     out.append(h)
 
+def render_mimebundle(obj, out):
+    '''
+    Use _repr_mimebundle_() when available and if it contains text/html.
+    '''
+    try:
+        h = obj._repr_mimebundle_(include=['text/html'])['text/html']
+    except:
+        return False
+    if h is None:
+        return False
+    out.append(h)
+
 def render_list(obj, out):
     '''
     Lists are divs containin divs, alternating row-inline and column flex layout.
     '''
-    with enter_tag(out=out):
+    with enter(out=out):
         for v in obj:
             render(v, out)
 
@@ -283,13 +321,12 @@ def render_dict(obj, out):
     '''
     Dicts become tables.
     '''
-    with enter_tag('table', style(display=None, width='100%'), ChildTag(None), out=out):
+    with enter(TABLE, out=out):
         for k, v in obj.items():
-            with enter_tag('tr', out=out):
-                out.append(row.begin())
-                with enter_tag('td', ChildTag(HORIZONTAL), out=out):
+            with enter(out=out):
+                with enter(out=out):
                     out.append(escape(str(k)))
-                with enter_tag('td', ChildTag(HORIZONTAL), out=out):
+                with enter(out=out):
                     render(v, out)
 
 def render_image(obj, out):
@@ -301,7 +338,7 @@ def render_image(obj, out):
         if hasattr(obj, 'save'): # Like a PIL.Image.Image
             obj.save(buf, format='png')
         elif hasattr(obj, 'savefig'): # Like a matplotlib.figure.Figure
-            obj.savefig(buf, format='png', bbox_inches='tight')
+            obj.savefig(buf, format='png')
         else:
             assert False
         src = 'data:image/png;base64,' + (
@@ -309,14 +346,14 @@ def render_image(obj, out):
         buf.close()
     except:
         return False
-    emit_tag('img', attr(src=src), style(flex='0'), out=out)
+    emit('img', attr(src=src), style(flex='0'), out=out)
 
 def render_pre(obj, out):
     '''
     Long multiline text data types are rendered in <pre> tags.
     '''
     s = str(obj)
-    with enter_tag('pre', out=out):
+    with enter('pre', out=out):
         out.append(escape(s))
 
 def render_modifications(obj, out):
@@ -326,6 +363,18 @@ def render_modifications(obj, out):
     assert isinstance(obj, (Tag, Attr, Style, ChildTag))
     modify_tag(obj)
 
+def render_pandas(obj, out):
+    '''
+    Allows control of Pandas outer-level table CSS and HTML attributes.
+    '''
+    with enter(TABLE, style(display=None, flexFlow=None, gap=None, alignItems=None)) as t:
+        styler = obj.style
+        css = str(t.style)
+        if css:
+            styler.set_table_styles([dict(selector='', props=css)])
+        if t.attrs:
+            styler.set_table_attributes(t.attrs)
+        out.append(styler.render())
 
 def class_name(x):
     return x.__module__ + '.' + x.__name__
@@ -345,6 +394,10 @@ def subclass_of(clsname):
 RENDERING_RULES = [
         # Special tag modifications
         ((Style, Attr, Tag, ChildTag), render_modifications),
+        # Pandas dataframes even though they have a _repr_html_
+        (subclass_of('pandas.core.frame.DataFrame'), render_pandas),
+        # Objects with an mimebundle repr, like altair charts
+        ((lambda x: hasattr(x, '_repr_mimebundle_')), render_mimebundle),
         # Objects with an html repr
         ((lambda x: hasattr(x, '_repr_html_')), render_html),
         # Strings should not be treated as lists
@@ -355,7 +408,7 @@ RENDERING_RULES = [
         (subclass_of('PIL.Image.Image'), render_image),
         # Matplotlib figures
         (subclass_of('matplotlib.figure.Figure'), render_image),
-        # Numpy, pytorch arrays
+        # Numpy, pytorch arrays are often too big to render every item
         (lambda x: hasattr(x, 'shape') and hasattr(x, 'dtype'), render_pre),
         # Generators and lists: recurse
         ((lambda x: hasattr(x, '__iter__')), render_list),
