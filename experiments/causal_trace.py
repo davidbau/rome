@@ -8,7 +8,9 @@ import torch
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM
 from util import nethook
+import copy
 
 
 def main():
@@ -322,10 +324,18 @@ class ModelAndTokenizer:
             tokenizer = AutoTokenizer.from_pretrained(model_name)
         if model is None:
             assert model_name is not None
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name, low_cpu_mem_usage=low_cpu_mem_usage,
-                torch_dtype=torch_dtype
-            )
+            if 't5' in model_name:
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage,
+                    torch_dtype=torch_dtype)
+                # Make a separate module for encoder and decoder input embedding,
+                # so that we can hook them separately.
+                model.encoder.embed_tokens = copy.deepcopy(model.encoder.embed_tokens)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage,
+                    torch_dtype=torch_dtype
+                )
             nethook.set_requires_grad(False, model)
             model.eval().cuda()
         self.tokenizer = tokenizer
@@ -333,7 +343,7 @@ class ModelAndTokenizer:
         self.layer_names = [
                 n
                 for n, m in model.named_modules()
-                if (re.match(r"^(transformer|gpt_neox)\.(h|layers)\.\d+$", n))
+                if (re.match(r"^(transformer|gpt_neox|encoder)\.(h|layers|block)\.\d+$", n))
         ]
         self.num_layers = len(self.layer_names)
 
@@ -355,6 +365,17 @@ def layername(model, num, kind=None):
         if kind == 'attn':
             kind = 'attention'
         return f'gpt_neox.layers.{num}{"" if kind is None else "." + kind}'
+    if hasattr(model, 'decoder'): # t5
+        if kind == 'embed':
+            return 'encoder.embed_tokens'
+        result = f'encoder.block.{num}'
+        if kind is None:
+            return result
+        if kind == 'mlp':
+            return result + '.layer.1'
+        else:
+            return result + '.layer.0'
+
     assert False, 'unknown transformer structure'
 
 def guess_subject(prompt):
