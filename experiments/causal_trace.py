@@ -398,6 +398,7 @@ def plot_hidden_flow(
 def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=None):
     differences = result["scores"]
     low_score = result["low_score"]
+    # high_score = result["high_score"]
     answer = result["answer"]
     kind = (
         None
@@ -417,6 +418,7 @@ def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=
                 kind
             ],
             vmin=low_score,
+            # vmax=high_score,
         )
         ax.invert_yaxis()
         ax.set_yticks([0.5 + i for i in range(len(differences))])
