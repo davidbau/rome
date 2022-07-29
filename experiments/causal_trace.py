@@ -9,6 +9,8 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from util import nethook
+from util.globals import DATA_DIR
+from dsets import KnownsDataset
 
 
 def main():
@@ -22,11 +24,13 @@ def main():
     aa(
         "--model_name",
         default="gpt2-xl",
-        choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "EleutherAI/gpt-neox-20b"],
+        choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "EleutherAI/gpt-neox-20b",
+            "gpt2-large", "gpt2-medium"],
     )
-    aa("--fact_file", default="counterfact/compiled/known_1000.json")
+    aa("--fact_file", default=None)
     aa("--output_dir", default="results/{model_name}/causal_trace")
-    aa("--noise_level", default=0.1, type=float)
+    aa("--noise_level", default=None, type=float)
+    aa("--replace", default=1, type=int)
     args = parser.parse_args()
 
     output_dir = args.output_dir.format(model_name=args.model_name.replace("/", "_"))
@@ -40,8 +44,16 @@ def main():
 
     mt = ModelAndTokenizer(args.model_name, torch_dtype=torch_dtype)
 
-    with open(args.fact_file) as f:
-        knowns = json.load(f)
+    if args.fact_file is None:
+        knowns = KnownsDataset(DATA_DIR)
+    else:
+        with open(args.fact_file) as f:
+            knowns = json.load(f)
+
+    if args.noise_level is None:
+        args.noise_level = collect_embedding_std(
+                mt, [k['subject'] for k in knowns])
+        print(f"Using noise_level {args.noise_level} to match model")
 
     for knowledge in tqdm(knowns):
         known_id = knowledge["known_id"]
@@ -82,6 +94,7 @@ def trace_with_patch(
     answers_t,  # Answer probabilities to collect
     tokens_to_mix,  # Range of tokens to corrupt (begin, end)
     noise=0.1,  # Level of noise to add
+    replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
 ):
     """
@@ -123,9 +136,13 @@ def trace_with_patch(
             # If requested, we corrupt a range of token embeddings on batch items x[1:]
             if tokens_to_mix is not None:
                 b, e = tokens_to_mix
-                x[1:, b:e] += noise * torch.from_numpy(
+                noise_data = noise * torch.from_numpy(
                     prng.randn(x.shape[0] - 1, e - b, x.shape[2])
                 ).to(x.device)
+                if replace:
+                    x[1:, b:e] = noise_data
+                else:
+                    x[1:, b:e] += noise_data
             return x
         if layer not in patch_spec:
             return x
@@ -219,7 +236,8 @@ def trace_with_repatch(
 
 
 def calculate_hidden_flow(
-    mt, prompt, subject, samples=10, noise=0.1, window=10, kind=None, expect=None
+    mt, prompt, subject, samples=10, noise=0.1, replace=False,
+    window=10, kind=None, expect=None
 ):
     """
     Runs causal tracing over every token/layer combination in the network
@@ -237,7 +255,8 @@ def calculate_hidden_flow(
     ).item()
     if not kind:
         differences = trace_important_states(
-            mt.model, mt.num_layers, inp, e_range, answer_t, noise=noise
+            mt.model, mt.num_layers, inp, e_range, answer_t,
+            noise=noise, replace=replace
         )
     else:
         differences = trace_important_window(
@@ -247,6 +266,7 @@ def calculate_hidden_flow(
             e_range,
             answer_t,
             noise=noise,
+            replace=replace,
             window=window,
             kind=kind,
         )
@@ -265,7 +285,7 @@ def calculate_hidden_flow(
     )
 
 
-def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1):
+def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1, replace=False):
     ntoks = inp["input_ids"].shape[1]
     table = []
     for tnum in range(ntoks):
@@ -278,6 +298,7 @@ def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1)
                 answer_t,
                 tokens_to_mix=e_range,
                 noise=noise,
+                replace=replace
             )
             row.append(r)
         table.append(torch.stack(row))
@@ -285,7 +306,7 @@ def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1)
 
 
 def trace_important_window(
-    model, num_layers, inp, e_range, answer_t, kind, window=10, noise=0.1
+    model, num_layers, inp, e_range, answer_t, kind, window=10, noise=0.1, replace=False
 ):
     ntoks = inp["input_ids"].shape[1]
     table = []
@@ -299,7 +320,8 @@ def trace_important_window(
                 )
             ]
             r = trace_with_patch(
-                model, inp, layerlist, answer_t, tokens_to_mix=e_range, noise=noise
+                model, inp, layerlist, answer_t, tokens_to_mix=e_range,
+                noise=noise, replace=replace
             )
             row.append(r)
         table.append(torch.stack(row))
@@ -487,6 +509,17 @@ def predict_from_input(model, inp):
     p, preds = torch.max(probs, dim=1)
     return preds, p
 
+def collect_embedding_std(mt, subjects):
+    alldata = []
+    for s in subjects:
+        inp = make_inputs(mt.tokenizer, [s])
+        count = 0
+        with nethook.Trace(mt.model.transformer.wte) as t:
+            mt.model(**inp)
+            alldata.append(t.output[0])
+    alldata = torch.cat(alldata)
+    noise_level = alldata.std()
+    return noise_level
 
 if __name__ == "__main__":
     main()
