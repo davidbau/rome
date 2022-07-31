@@ -12,6 +12,14 @@ from util import nethook
 from util.globals import DATA_DIR
 from dsets import KnownsDataset
 
+from datasets import load_dataset
+from util.runningstats import Covariance, tally
+from rome.tok_dataset import (
+    TokenizedDataset,
+    dict_to_,
+    flatten_masked_batch,
+    length_collation,
+)
 
 def main():
     import argparse
@@ -21,6 +29,13 @@ def main():
     def aa(*args, **kwargs):
         parser.add_argument(*args, **kwargs)
 
+    def parse_noise_rule(code):
+        if code in ['m', 's']:
+            return code
+        elif re.match('^t\d+', code):
+            return code
+        else:
+            return float(code)
     aa(
         "--model_name",
         default="gpt2-xl",
@@ -29,11 +44,13 @@ def main():
     )
     aa("--fact_file", default=None)
     aa("--output_dir", default="results/{model_name}/causal_trace")
-    aa("--noise_level", default=None, type=float)
+    aa("--noise_level", default='m', type=parse_noise_rule)
     aa("--replace", default=1, type=int)
     args = parser.parse_args()
 
-    output_dir = args.output_dir.format(model_name=args.model_name.replace("/", "_"))
+    modeldir = f'r{args.replace}_{args.model_name.replace("/", "_")}'
+    modeldir = f'n{args.noise_level}_' + modeldir
+    output_dir = args.output_dir.format(model_name=modeldir)
     result_dir = f"{output_dir}/cases"
     pdf_dir = f"{output_dir}/pdfs"
     os.makedirs(result_dir, exist_ok=True)
@@ -50,10 +67,21 @@ def main():
         with open(args.fact_file) as f:
             knowns = json.load(f)
 
-    if args.noise_level is None:
-        args.noise_level = collect_embedding_std(
-                mt, [k['subject'] for k in knowns])
-        print(f"Using noise_level {args.noise_level} to match model")
+    noise_level = args.noise_level
+    if isinstance(noise_level, str):
+        if noise_level == 's':
+            # Automatic spherical gaussian
+            noise_level = collect_embedding_std(
+                    mt, [k['subject'] for k in knowns])
+            print(f"Using noise_level {args.noise_level} to match model")
+        elif noise_level == 'm':
+            # Automatic multivariate gaussian
+            noise_level = collect_embedding_gaussian(mt)
+            print(f"Using multivariate gaussian to match model noise")
+        elif noise_level.startswith('t'):
+            # Automatic d-distribution with d degrees of freedom
+            degrees = float(noise_level[1:])
+            noise_level = collect_embedding_tdist(mt, degrees)
 
     for knowledge in tqdm(knowns):
         known_id = knowledge["known_id"]
@@ -67,7 +95,7 @@ def main():
                     knowledge["subject"],
                     expect=knowledge["attribute"],
                     kind=kind,
-                    noise=args.noise_level,
+                    noise=noise_level,
                 )
                 numpy_result = {
                     k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
@@ -131,13 +159,18 @@ def trace_with_patch(
         return x[0] if isinstance(x, tuple) else x
 
     # Define the model-patching rule.
+    if isinstance(noise, float):
+        noise_fn = lambda x: noise * x
+    else:
+        noise_fn = noise
+
     def patch_rep(x, layer):
         if layer == embed_layername:
             # If requested, we corrupt a range of token embeddings on batch items x[1:]
             if tokens_to_mix is not None:
                 b, e = tokens_to_mix
-                noise_data = noise * torch.from_numpy(
-                    prng.randn(x.shape[0] - 1, e - b, x.shape[2])
+                noise_data = noise_fn(torch.from_numpy(
+                    prng.randn(x.shape[0] - 1, e - b, x.shape[2]))
                 ).to(x.device)
                 if replace:
                     x[1:, b:e] = noise_data
@@ -520,6 +553,86 @@ def collect_embedding_std(mt, subjects):
     alldata = torch.cat(alldata)
     noise_level = alldata.std()
     return noise_level
+
+def get_embedding_cov(mt):
+    model = mt.model
+    tokenizer = mt.tokenizer
+
+    
+    def get_ds():
+        ds_name = 'wikitext'
+        raw_ds = load_dataset(
+            ds_name,
+            dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name],
+        )
+        maxlen = model.config.n_positions
+        return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
+    ds = get_ds()
+    sample_size = 1000
+    batch_size = 10
+    filename= None
+    batch_tokens = 100
+
+    progress = lambda x, **k: x
+
+    stat = Covariance()
+    loader = tally(
+        stat,
+        ds,
+        cache=filename,
+        sample_size=sample_size,
+        batch_size=batch_size,
+        collate_fn=length_collation(batch_tokens),
+        pin_memory=True,
+        random_sample=1,
+        num_workers=0
+    )
+    with torch.no_grad():
+        for batch_group in loader:
+            for batch in batch_group:
+                batch = dict_to_(batch, "cuda")
+                with nethook.Trace(model, layername(mt.model, 0, 'embed')) as tr:
+                    model(**batch)
+                feats = flatten_masked_batch(tr.output, batch["attention_mask"])
+                stat.add(feats.cpu().double())
+    return stat.mean(), stat.covariance()
+
+def make_generator_transform(mean=None, cov=None):
+    d = len(mean) if mean is not None else len(cov)
+    device = mean.device if mean is not None else cov.device
+    layer = torch.nn.Linear(d, d, dtype=torch.double)
+    nethook.set_requires_grad(False, layer)
+    layer.to(device)
+    layer.bias[...] = 0 if mean is None else mean
+    if cov is None:
+        layer.weight[...] = torch.eye(d).to(device)
+    else:
+        _, s, v = cov.svd()
+        w = s.sqrt()[None, :] * v
+        layer.weight[...] = w
+    return layer
+
+def collect_embedding_gaussian(mt):
+    m, c = get_embedding_cov(mt)
+    return make_generator_transform(m, c)
+
+def collect_embedding_tdist(mt, degree=3):
+    # We will sample sqrt(degree / u) * sample, where u is from the chi2[degree] dist.
+    # And this will give us variance is (degree / degree - 2) * cov.
+    # Therefore if we want to match the sample variance, we should
+    # reduce cov by a factor of (degree - 2) / degree.
+    # In other words we should be sampling sqrt(degree - 2 / u) * sample.
+    u_sample = torch.from_numpy(
+        numpy.random.RandomState(2).chisquare(df=degree, size=1000))
+    fixed_sample = ((degree - 2) / u_sample).sqrt()
+    mvg = collect_embedding_gaussian(mt)
+    def normal_to_student(x):
+        gauss = mvg(x)
+        size = gauss.shape[:-1].numel()
+        factor = fixed_sample[:size].reshape(gauss.shape[:-1] + (1,))
+        student = factor * gauss
+        return student
+    return normal_to_student
 
 if __name__ == "__main__":
     main()
