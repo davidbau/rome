@@ -514,7 +514,7 @@ def collect_embedding_std(mt, subjects):
     for s in subjects:
         inp = make_inputs(mt.tokenizer, [s])
         count = 0
-        with nethook.Trace(mt.model.transformer.wte) as t:
+        with nethook.Trace(mt.model, layername(mt.model, 0, 'embed')) as t:
             mt.model(**inp)
             alldata.append(t.output[0])
     alldata = torch.cat(alldata)
