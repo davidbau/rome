@@ -96,6 +96,7 @@ def main():
                     expect=knowledge["attribute"],
                     kind=kind,
                     noise=noise_level,
+                    replace=args.replace
                 )
                 numpy_result = {
                     k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
@@ -104,7 +105,7 @@ def main():
                 numpy.savez(filename, **numpy_result)
             else:
                 numpy_result = numpy.load(filename, allow_pickle=True)
-            if not result["correct_prediction"]:
+            if not numpy_result["correct_prediction"]:
                 tqdm.write(f"Skipping {knowledge['prompt']}")
                 continue
             plot_result = dict(numpy_result)
@@ -569,7 +570,7 @@ def get_embedding_cov(mt):
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
     ds = get_ds()
     sample_size = 1000
-    batch_size = 10
+    batch_size = 5
     filename= None
     batch_tokens = 100
 
