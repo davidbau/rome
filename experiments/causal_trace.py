@@ -32,7 +32,7 @@ def main():
     def parse_noise_rule(code):
         if code in ['m', 's']:
             return code
-        elif re.match('^t\d+', code):
+        elif re.match('^[ut][\d\.]+', code):
             return code
         else:
             return float(code)
@@ -68,6 +68,7 @@ def main():
             knowns = json.load(f)
 
     noise_level = args.noise_level
+    uniform_noise = False
     if isinstance(noise_level, str):
         if noise_level == 's':
             # Automatic spherical gaussian
@@ -82,6 +83,9 @@ def main():
             # Automatic d-distribution with d degrees of freedom
             degrees = float(noise_level[1:])
             noise_level = collect_embedding_tdist(mt, degrees)
+        elif noise_level.startswith('u'):
+            uniform_noise = True
+            noise_level = float(noise_level[1:])
 
     for knowledge in tqdm(knowns):
         known_id = knowledge["known_id"]
@@ -96,6 +100,7 @@ def main():
                     expect=knowledge["attribute"],
                     kind=kind,
                     noise=noise_level,
+                    uniform_noise=uniform_noise,
                     replace=args.replace
                 )
                 numpy_result = {
@@ -123,6 +128,7 @@ def trace_with_patch(
     answers_t,  # Answer probabilities to collect
     tokens_to_mix,  # Range of tokens to corrupt (begin, end)
     noise=0.1,  # Level of noise to add
+    uniform_noise=False,
     replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
 ):
@@ -149,7 +155,12 @@ def trace_with_patch(
     any number of token indices and layers can be listed.
     """
 
-    prng = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    if uniform_noise:
+        prng = (lambda *shape: rs.uniform(-1, 1, shape))
+    else:
+        prng = (lambda *shape: rs.randn(*shape))
+
     patch_spec = defaultdict(list)
     for t, l in states_to_patch:
         patch_spec[l].append(t)
@@ -171,7 +182,7 @@ def trace_with_patch(
             if tokens_to_mix is not None:
                 b, e = tokens_to_mix
                 noise_data = noise_fn(torch.from_numpy(
-                    prng.randn(x.shape[0] - 1, e - b, x.shape[2]))
+                    prng(x.shape[0] - 1, e - b, x.shape[2]))
                 ).to(x.device)
                 if replace:
                     x[1:, b:e] = noise_data
@@ -217,8 +228,13 @@ def trace_with_repatch(
     answers_t,  # Answer probabilities to collect
     tokens_to_mix,  # Range of tokens to corrupt (begin, end)
     noise=0.1,  # Level of noise to add
+    uniform_noise=False,
 ):
-    prng = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    if uniform_noise:
+        prng = (lambda *shape: rs.uniform(-1, 1, shape))
+    else:
+        prng = (lambda *shape: rs.randn(*shape))
     patch_spec = defaultdict(list)
     for t, l in states_to_patch:
         patch_spec[l].append(t)
@@ -238,7 +254,7 @@ def trace_with_repatch(
             if tokens_to_mix is not None:
                 b, e = tokens_to_mix
                 x[1:, b:e] += noise * torch.from_numpy(
-                    prng.randn(x.shape[0] - 1, e - b, x.shape[2])
+                    prng(x.shape[0] - 1, e - b, x.shape[2])
                 ).to(x.device)
             return x
         if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
@@ -270,7 +286,7 @@ def trace_with_repatch(
 
 
 def calculate_hidden_flow(
-    mt, prompt, subject, samples=10, noise=0.1, replace=False,
+    mt, prompt, subject, samples=10, noise=0.1, uniform_noise=False, replace=False,
     window=10, kind=None, expect=None
 ):
     """
@@ -285,12 +301,12 @@ def calculate_hidden_flow(
         return dict(correct_prediction=False)
     e_range = find_token_range(mt.tokenizer, inp["input_ids"][0], subject)
     low_score = trace_with_patch(
-        mt.model, inp, [], answer_t, e_range, noise=noise
+        mt.model, inp, [], answer_t, e_range, noise=noise, uniform_noise=uniform_noise
     ).item()
     if not kind:
         differences = trace_important_states(
             mt.model, mt.num_layers, inp, e_range, answer_t,
-            noise=noise, replace=replace
+            noise=noise, uniform_noise=uniform_noise, replace=replace
         )
     else:
         differences = trace_important_window(
@@ -300,6 +316,7 @@ def calculate_hidden_flow(
             e_range,
             answer_t,
             noise=noise,
+            uniform_noise=uniform_noise,
             replace=replace,
             window=window,
             kind=kind,
@@ -319,7 +336,8 @@ def calculate_hidden_flow(
     )
 
 
-def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1, replace=False):
+def trace_important_states(model, num_layers, inp, e_range, answer_t,
+        noise=0.1, uniform_noise=False, replace=False):
     ntoks = inp["input_ids"].shape[1]
     table = []
     for tnum in range(ntoks):
@@ -332,6 +350,7 @@ def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1,
                 answer_t,
                 tokens_to_mix=e_range,
                 noise=noise,
+                uniform_noise=uniform_noise,
                 replace=replace
             )
             row.append(r)
@@ -340,7 +359,8 @@ def trace_important_states(model, num_layers, inp, e_range, answer_t, noise=0.1,
 
 
 def trace_important_window(
-    model, num_layers, inp, e_range, answer_t, kind, window=10, noise=0.1, replace=False
+    model, num_layers, inp, e_range, answer_t, kind, window=10,
+    noise=0.1, uniform_noise=False, replace=False
 ):
     ntoks = inp["input_ids"].shape[1]
     table = []
@@ -355,7 +375,7 @@ def trace_important_window(
             ]
             r = trace_with_patch(
                 model, inp, layerlist, answer_t, tokens_to_mix=e_range,
-                noise=noise, replace=replace
+                noise=noise, uniform_noise=uniform_noise, replace=replace
             )
             row.append(r)
         table.append(torch.stack(row))
@@ -420,12 +440,14 @@ def guess_subject(prompt):
 
 
 def plot_hidden_flow(
-    mt, prompt, subject=None, samples=10, noise=0.1, window=10, kind=None, savepdf=None
+    mt, prompt, subject=None, samples=10, noise=0.1, uniform_noise=False,
+    window=10, kind=None, savepdf=None
 ):
     if subject is None:
         subject = guess_subject(prompt)
     result = calculate_hidden_flow(
-        mt, prompt, subject, samples=samples, noise=noise, window=window, kind=kind
+        mt, prompt, subject, samples=samples, noise=noise, uniform_noise=uniform_noise,
+        window=window, kind=kind
     )
     plot_trace_heatmap(result, savepdf)
 
@@ -566,7 +588,10 @@ def get_embedding_cov(mt):
             ds_name,
             dict(wikitext="wikitext-103-raw-v1", wikipedia="20200501.en")[ds_name],
         )
-        maxlen = model.config.n_positions
+        try:
+            maxlen = model.config.n_positions
+        except:
+            maxlen = 100 # Hack due to missing setting in GPT2-NeoX.
         return TokenizedDataset(raw_ds["train"], tokenizer, maxlen=maxlen)
     ds = get_ds()
     sample_size = 1000
@@ -592,6 +617,7 @@ def get_embedding_cov(mt):
         for batch_group in loader:
             for batch in batch_group:
                 batch = dict_to_(batch, "cuda")
+                del batch['position_ids']
                 with nethook.Trace(model, layername(mt.model, 0, 'embed')) as tr:
                     model(**batch)
                 feats = flatten_masked_batch(tr.output, batch["attention_mask"])
