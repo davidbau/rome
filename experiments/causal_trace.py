@@ -552,7 +552,7 @@ def collect_embedding_std(mt, subjects):
             mt.model(**inp)
             alldata.append(t.output[0])
     alldata = torch.cat(alldata)
-    noise_level = alldata.std()
+    noise_level = alldata.std().item()
     return noise_level
 
 def get_embedding_cov(mt):
