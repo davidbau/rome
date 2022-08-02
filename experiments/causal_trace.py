@@ -32,7 +32,7 @@ def main():
     def parse_noise_rule(code):
         if code in ['m', 's']:
             return code
-        elif re.match('^[ut][\d\.]+', code):
+        elif re.match('^[uts][\d\.]+', code):
             return code
         else:
             return float(code)
@@ -70,11 +70,12 @@ def main():
     noise_level = args.noise_level
     uniform_noise = False
     if isinstance(noise_level, str):
-        if noise_level == 's':
+        if noise_level.startswith('s'):
             # Automatic spherical gaussian
-            noise_level = collect_embedding_std(
+            factor = float(noise_level[1:]) if len(noise_level) > 1 else 1.0
+            noise_level = factor * collect_embedding_std(
                     mt, [k['subject'] for k in knowns])
-            print(f"Using noise_level {args.noise_level} to match model")
+            print(f"Using noise_level {noise_level} to match model times {factor}")
         elif noise_level == 'm':
             # Automatic multivariate gaussian
             noise_level = collect_embedding_gaussian(mt)
