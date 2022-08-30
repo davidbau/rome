@@ -44,8 +44,8 @@ def main():
     )
     aa("--fact_file", default=None)
     aa("--output_dir", default="results/{model_name}/causal_trace")
-    aa("--noise_level", default='m', type=parse_noise_rule)
-    aa("--replace", default=1, type=int)
+    aa("--noise_level", default='s3', type=parse_noise_rule)
+    aa("--replace", default=0, type=int)
     args = parser.parse_args()
 
     modeldir = f'r{args.replace}_{args.model_name.replace("/", "_")}'
